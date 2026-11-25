@@ -209,3 +209,6 @@ ssh -N -L 4000:127.0.0.1:4000 ubuntu@10.161.4.175
 Open `http://localhost:4000`, select RAN, then Ontology Graph. Choose Current or Target state. The graph uses the named graph IRIs above. Run Preview first; Execute writes only to Target.
 
 **Isolation:** The RAN route uses `/ran-graphdb` to proxy to `10.161.4.199:7200` and `/ran-whatif` to proxy to `10.161.4.199:8010`. Existing Core `/graphdb` and Transport `/transport-api` proxies remain pointed at `127.0.0.1` on `10.161.4.175`; their repository and backend configuration is not changed by the RAN update.
+
+
+*******************************
