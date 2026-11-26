@@ -12,12 +12,12 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/ran-graphdb/, ''),
       },
       '/ran-api': {
-        target: 'http://10.161.4.199:8000',
+        target: 'http://10.161.4.199:8200',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/ran-api/, ''),
       },
       '/ran-whatif': {
-        target: 'http://10.161.4.199:8010',
+        target: 'http://10.161.4.199:8200',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/ran-whatif/, ''),
         timeout: 610000,
