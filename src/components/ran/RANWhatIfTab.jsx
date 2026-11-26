@@ -3,7 +3,7 @@ import { loadRANTopology, RAN_GRAPHDB, runRANWhatIf } from '../../ranGraphdbApi'
 
 const shortId = (iri = '') => String(iri).split(/[/#:]/).filter(Boolean).pop() || iri;
 
-export default function RANWhatIfTab({ active, onRefreshGraph }) {
+export default function RANWhatIfTab({ active, onRefreshGraph, siteScenario }) {
   const [topology, setTopology] = useState(null);
   const [entityId, setEntityId] = useState('');
   const [factor, setFactor] = useState(1.3);
@@ -12,33 +12,45 @@ export default function RANWhatIfTab({ active, onRefreshGraph }) {
   const [loading, setLoading] = useState('');
   const [error, setError] = useState('');
   const [serviceStatus, setServiceStatus] = useState(null);
+  const [serviceStatusError, setServiceStatusError] = useState('');
 
   const entities = useMemo(() => {
-    if (!topology) return [];
-    const dus = (topology.duMetrics || []).map((x) => ({ id: shortId(x.du), label: `${shortId(x.du)} · Distributed Unit` }));
-    const cells = (topology.cells || []).map((x) => ({ id: shortId(x.cell), label: `${x.name || shortId(x.cell)} · Cell` }));
-    return [...dus, ...cells];
-  }, [topology]);
+    const clusters = siteScenario?.payload?.clusters || [];
+    const options = clusters.flatMap((cluster) => [
+      { id: shortId(cluster.id), label: `${shortId(cluster.id)} · CU cluster` },
+      ...(cluster.dus || []).map((du) => ({
+        id: shortId(du.id),
+        label: `${shortId(du.id)} · DU (${shortId(cluster.id)})`,
+      })),
+    ]).filter((option) => option.id);
+    return [...new Map(options.map((option) => [option.id, option])).values()];
+  }, [siteScenario]);
+
+  useEffect(() => {
+    const availableIds = new Set(entities.map((entity) => entity.id));
+    setEntityId((previous) => availableIds.has(previous) ? previous : (entities[0]?.id || ''));
+    setPreview(null);
+    setExecution(null);
+    setError('');
+  }, [entities, siteScenario?.siteId]);
 
   useEffect(() => {
     if (!active) return undefined;
     let alive = true;
     setError('');
-    Promise.all([
-      loadRANTopology('current'),
-      fetch('/ran-whatif/health').then(async (r) => {
+    setServiceStatusError('');
+    loadRANTopology('current').then((graph) => {
+      if (!alive) return;
+      setTopology(graph);
+    }).catch((e) => { if (alive) setError(e.message); });
+    fetch('/ran-whatif/health').then(async (r) => {
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || `What-if service HTTP ${r.status}`);
         return d;
-      }),
-    ]).then(([graph, status]) => {
+      }).then((status) => {
       if (!alive) return;
-      setTopology(graph);
       setServiceStatus(status);
-      setEntityId((previous) => previous && [...(graph.duMetrics || []).map((x) => shortId(x.du)), ...(graph.cells || []).map((x) => shortId(x.cell))].includes(previous)
-        ? previous
-        : shortId(graph.duMetrics?.[0]?.du || graph.cells?.[0]?.cell || ''));
-    }).catch((e) => { if (alive) setError(e.message); });
+    }).catch((e) => { if (alive) setServiceStatusError(e.message); });
     return () => { alive = false; };
   }, [active]);
 
@@ -48,6 +60,12 @@ export default function RANWhatIfTab({ active, onRefreshGraph }) {
   });
 
   async function runPreview() {
+    if (!entityId) {
+      setError(siteScenario
+        ? 'The selected site has no CU clusters or DUs available for analysis.'
+        : 'Select a site in Data Ingestion and wait for its CU/DU cluster data to load.');
+      return;
+    }
     setLoading('preview'); setError(''); setPreview(null); setExecution(null);
     try {
       const result = await runRANWhatIf('preview', scenario());
@@ -72,13 +90,14 @@ export default function RANWhatIfTab({ active, onRefreshGraph }) {
       <div className="page-title">What-if simulation</div>
       <div className="card whatif-intro">
         <h3>RAN traffic surge — automated what-if analysis</h3>
-        <p className="sub">The engine reads the network from the Current graph and overlays the newest reading of every telemetry series using the supplied GraphDB queries. Preview runs the scenario with <code>--dry-run</code> and writes nothing. Execute derives and replaces only the Target graph.</p>
+        <p className="sub">Select a CU cluster or DU returned for the selected Data Ingestion site. The engine applies the traffic surge to that entity using the Current graph and newest telemetry. Preview runs read-only; Execute derives and replaces only the Target graph.</p>
         <div className="row" style={{ alignItems: 'end', marginTop: 14 }}>
-          <label style={{ minWidth: 260, flex: 1 }}>Affected network element
+          <label style={{ minWidth: 260, flex: 1 }}>Affected CU cluster or DU
             <select className="input" value={entityId} onChange={(e) => { setEntityId(e.target.value); setPreview(null); setExecution(null); }} disabled={!entities.length || !!loading}>
-              {!entities.length && <option value="">No DU or Cell found in Current graph</option>}
+              {!entities.length && <option value="">{siteScenario ? 'No CU clusters or DUs returned for this site' : 'Select a site in Data Ingestion first'}</option>}
               {entities.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}
             </select>
+            {siteScenario && <span className="sub">Options from site {siteScenario.payload?.site || siteScenario.siteId}</span>}
           </label>
           <label style={{ minWidth: 220, flex: 1 }}>Traffic multiplier: <b>{Number(factor).toFixed(2)}×</b>
             <input type="range" min="1.05" max="2" step="0.05" value={factor} onChange={(e) => { setFactor(Number(e.target.value)); setPreview(null); setExecution(null); }} style={{ display: 'block', width: '100%' }} />
@@ -86,11 +105,12 @@ export default function RANWhatIfTab({ active, onRefreshGraph }) {
           </label>
         </div>
         <div className="whatif-actions" style={{ marginTop: 14 }}>
-          <button className="btn blue" onClick={runPreview} disabled={!!loading || !entityId || (!serviceStatus?.script_exists || serviceStatus?.graphdb_connected === false)}>{loading === 'preview' ? 'Analysing…' : '▶ Run what-if analysis'}</button>
+          <button className="btn blue" onClick={runPreview} disabled={!!loading}>{loading === 'preview' ? 'Analysing…' : '▶ Run what-if analysis'}</button>
           <button className="btn green" onClick={execute} disabled={!!loading || !preview?.ok || !!execution}>{loading === 'execute' ? 'Writing target…' : '⚡ Execute what-if'}</button>
         </div>
         <div className="sub" style={{ marginTop: 9 }}>Repository: <b>{RAN_GRAPHDB.repository}</b> · Current: <code>{RAN_GRAPHDB.currentGraph}</code> · Target: <code>{RAN_GRAPHDB.targetGraph}</code></div>
         {serviceStatus && <div className="sub" style={{ marginTop: 5 }}>Engine: {serviceStatus.script_exists ? 'script detected' : 'script missing'} · GraphDB: {serviceStatus.graphdb_connected ? `connected (${serviceStatus.current_graph_triples ?? 0} Current triples)` : 'not connected'} · repository: {serviceStatus.repository || 'not reported'}</div>}
+        {serviceStatusError && <div className="sub" style={{ marginTop: 5, color: '#b42318' }}>What-if service status unavailable: {serviceStatusError}</div>}
       </div>
       {error && <div className="card" style={{ marginTop: 14, color: '#b42318' }}><b>RAN what-if error:</b><div style={{ whiteSpace: 'pre-wrap', marginTop: 6 }}>{error}</div></div>}
       {preview && <div className="card" style={{ marginTop: 14 }}>
@@ -105,7 +125,7 @@ export default function RANWhatIfTab({ active, onRefreshGraph }) {
         <pre className="log" style={{ maxHeight: 430, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{execution.narration}</pre>
         <p className="note">Target graph refreshed. Open Ontology Graph and select <b>Target state</b> to visualize it.</p>
       </div>}
-      {!preview && !error && !loading && <div className="card" style={{ marginTop: 14 }}><span className="note">Choose a DU or Cell and traffic multiplier, then click “Run what-if analysis”.</span></div>}
+      {!preview && !error && !loading && <div className="card" style={{ marginTop: 14 }}><span className="note">{entities.length ? 'Choose a CU cluster or DU and traffic multiplier, then click “Run what-if analysis”.' : 'Select a site in Data Ingestion to load its CU clusters and DUs here.'}</span></div>}
       {topology && <div className="sub" style={{ marginTop: 10 }}>Current graph inventory: {fmt(topology.duMetrics?.length)} DUs, {fmt(topology.cells?.length)} Cells, {fmt(topology.tripleCount)} RDF triples.</div>}
     </section>
   );

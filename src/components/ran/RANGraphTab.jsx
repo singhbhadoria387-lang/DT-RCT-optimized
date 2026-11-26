@@ -19,19 +19,85 @@ export default function RANGraphTab({ active, graph, graphState = 'current', onS
       const type = String(n.type || '').toLowerCase();
       const visual = type === 'site' ? { shape: 'box', color: { background: '#dbeafe', border: '#2563eb' } }
         : type.includes('host') ? { shape: 'database', color: { background: '#dcfce7', border: '#16a34a' } }
-        : type === 'ocu' ? { shape: 'ellipse', color: { background: '#fef3c7', border: '#d97706' } }
-        : type === 'o_du' ? { shape: 'dot', color: { background: '#ede9fe', border: '#7c3aed' } }
-        : { shape: 'dot', color: { background: '#e7f0ff', border: '#4f6fc4' } };
+          : type === 'ocu' ? { shape: 'ellipse', color: { background: '#fef3c7', border: '#d97706' } }
+            : type === 'o_du' ? { shape: 'dot', color: { background: '#ede9fe', border: '#7c3aed' } }
+              : { shape: 'dot', color: { background: '#e7f0ff', border: '#4f6fc4' } };
       return { ...n, ...visual, size: type === 'o_du' ? 23 : type.includes('host') ? 22 : 18, font: { color: '#25304a', size: 12, face: 'Arial' } };
     }));
     const edges = new DataSet(graph.edges);
     networkRef.current?.destroy();
-    networkRef.current = new Network(mountRef.current, { nodes, edges }, {
-      autoResize: true, physics: { stabilization: { iterations: 180 }, barnesHut: { gravitationalConstant: -4500, springLength: 130 } },
-      interaction: { hover: true, navigationButtons: true, keyboard: true },
-      edges: { color: { color: '#94a3b8', highlight: '#2563eb' }, font: { size: 10, color: '#64748b', align: 'middle' }, smooth: { type: 'dynamic' } },
-      nodes: { borderWidth: 1, color: { background: '#e7f0ff', border: '#4f6fc4', highlight: { background: '#dbeafe', border: '#1d4ed8' } } },
+    networkRef.current = new Network(
+      mountRef.current,
+      { nodes, edges },
+      {
+        autoResize: true,
+
+        physics: {
+          enabled: true,
+          stabilization: {
+            enabled: true,
+            iterations: 100,
+            updateInterval: 25,
+            fit: true
+          },
+          barnesHut: {
+            gravitationalConstant: -3000,
+            centralGravity: 0.3,
+            springLength: 120,
+            springConstant: 0.04,
+            damping: 0.15
+          }
+        },
+
+        interaction: {
+          hover: true,
+          navigationButtons: true,
+          keyboard: true,
+          hideEdgesOnDrag: true,
+          hideNodesOnDrag: false
+        },
+
+        edges: {
+          color: {
+            color: '#94a3b8',
+            highlight: '#2563eb'
+          },
+          font: {
+            size: 10,
+            color: '#64748b',
+            align: 'middle'
+          },
+          smooth: false
+        },
+
+        nodes: {
+          borderWidth: 1,
+          font: {
+            size: 12,
+            face: 'Arial'
+          }
+        }
+      }
+    );
+
+    // Stop physics once the initial graph has settled.
+    networkRef.current.once('stabilizationIterationsDone', () => {
+      networkRef.current?.setOptions({
+        physics: false
+      });
     });
+    // networkRef.current = new Network(mountRef.current, { nodes, edges }, {
+    //   autoResize: true, 
+    //   physics: { 
+    //     stabilization: { iterations: 180 }, 
+    //     barnesHut: { gravitationalConstant: -4500,
+    //        springLength: 130 
+    //       } 
+    //     },
+    //   interaction: { hover: true, navigationButtons: true, keyboard: true },
+    //   edges: { color: { color: '#94a3b8', highlight: '#2563eb' }, font: { size: 10, color: '#64748b', align: 'middle' }, smooth: { type: 'dynamic' } },
+    //   nodes: { borderWidth: 1, color: { background: '#e7f0ff', border: '#4f6fc4', highlight: { background: '#dbeafe', border: '#1d4ed8' } } },
+    // });
     return () => { networkRef.current?.destroy(); networkRef.current = null; };
   }, [graph, active]);
 
@@ -86,7 +152,7 @@ export default function RANGraphTab({ active, graph, graphState = 'current', onS
           <button className="btn blue" disabled={!focusNode || !networkRef.current} onClick={() => networkRef.current?.focus(focusNode, { scale: 1.25, animation: { duration: 650, easingFunction: 'easeInOutQuad' } })}>Focus node</button>
         </div>
       </div>
-      <div className="card" style={{ marginBottom: 14 }}>
+      {/*<div className="card" style={{ marginBottom: 14 }}>
         <div className="flex justify-between items-center flex-wrap gap-2"><h3>GraphDB visual graph configuration</h3><span className="sub">GraphDB repository: {RAN_GRAPHDB.repository}</span></div>
         <div className="flex flex-wrap gap-2" style={{ margin: '10px 0' }}>
           {RAN_VISUAL_CONFIG_QUERIES(graphState).map((item, index) => <button key={item.key} className={`btn ${visualQueryIndex === index ? 'blue' : ''}`} onClick={() => setVisualQueryIndex(index)}>{item.label}</button>)}
@@ -94,7 +160,7 @@ export default function RANGraphTab({ active, graph, graphState = 'current', onS
         <div className="sub" style={{ marginBottom: 7 }}>{RAN_VISUAL_CONFIG_QUERIES(graphState)[visualQueryIndex]?.description}</div>
         <pre className="gqlbox" style={{ maxHeight: 180, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{RAN_VISUAL_CONFIG_QUERIES(graphState)[visualQueryIndex]?.query}</pre>
         <div className="sub">These rules are executed against the selected <b>{graphState.toUpperCase()}</b> named graph. Starting point types and expansion predicates follow the GraphDB Visual Graph configuration you supplied.</div>
-      </div>
+      </div>*/}
       <div className="card" style={{ marginBottom: 14 }}>
         <div ref={mountRef} style={{ height: 480, width: '100%', background: '#fbfcff', border: '1px solid #e4e8f0', borderRadius: 10 }} />
         {graph && graph.nodes.length === 0 && !error && <p className="note" style={{ marginTop: 8 }}>No Site, O-Cloud Host, O-Cloud DU Host, O-CU or O-DU nodes were found. Confirm that this repository contains the selected named graph and that its rdf:type values use the configured RAN ontology classes.</p>}

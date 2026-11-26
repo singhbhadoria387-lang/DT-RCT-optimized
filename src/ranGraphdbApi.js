@@ -2,6 +2,7 @@
 // Core and Transport continue using their existing local GraphDB proxies on 10.161.4.175.
 const REPOSITORY = import.meta.env.VITE_GRAPHDB_RAN_REPOSITORY || 'Traffic_Steering';
 const ROOT = `/ran-graphdb/repositories/${encodeURIComponent(REPOSITORY)}`;
+const GRAPHDB_REQUEST_TIMEOUT_MS = 30_000;
 const RAN_NS = 'http://example.com/ran-dt/';
 const CURRENT_GRAPH = import.meta.env.VITE_GRAPHDB_RAN_CURRENT_GRAPH || `${RAN_NS}graph/current`;
 const TARGET_GRAPH = import.meta.env.VITE_GRAPHDB_RAN_TARGET_GRAPH || `${RAN_NS}graph/target`;
@@ -12,6 +13,15 @@ const EDGE_PREDICATES = ['locatedAt', 'hostedOn', 'containsNode', 'connectsToCUC
 const typeValues = NODE_TYPES.map((x) => `ran:${x}`).join(', ');
 const edgeValues = EDGE_PREDICATES.map((x) => `ran:${x}`).join(', ');
 
+const RAN_GRAPH_LIMITS={
+  RDF_TRIPLES: 300,
+  STARTING_NODES: 40,
+  RELATIONSHIPS: 100,
+  NODE_PROPERTIES: 80,
+  CELLS: 50,
+  TELEMETRY_ROWS: 200,
+}
+
 export const RAN_GRAPHDB = {
   repository: REPOSITORY,
   host: '10.161.4.199',
@@ -20,20 +30,55 @@ export const RAN_GRAPHDB = {
 };
 
 export async function runRANSparql(query) {
-  const response = await fetch(ROOT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-      Accept: 'application/sparql-results+json, application/json;q=0.9',
-    },
-    body: new URLSearchParams({ query }).toString(),
-  });
-  const body = await response.text();
+  let response;
+  let body;
+  const signal = AbortSignal.timeout(GRAPHDB_REQUEST_TIMEOUT_MS);
+  try {
+    response = await fetch(ROOT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        Accept: 'application/sparql-results+json, application/json;q=0.9',
+      },
+      body: new URLSearchParams({ query }).toString(),
+      signal,
+    });
+    body = await response.text();
+  } catch (error) {
+    if (signal.aborted) {
+      throw new Error(`RAN GraphDB query timed out after ${GRAPHDB_REQUEST_TIMEOUT_MS / 1000} seconds.`);
+    }
+    throw error;
+  }
   if (!response.ok) throw new Error(`RAN GraphDB (${REPOSITORY}) HTTP ${response.status}: ${body.slice(0, 600)}`);
   let data;
   try { data = JSON.parse(body); } catch { throw new Error(`GraphDB did not return SPARQL JSON: ${body.slice(0, 300)}`); }
   if (!Array.isArray(data?.results?.bindings)) throw new Error('Unexpected GraphDB response. Check repository, query and GraphDB permissions.');
   return data.results.bindings;
+}
+
+export async function loadRANSiteScenario(site, demandMbps) {
+  const siteId = String(site).replace(/^Site/, '');
+  const response = await fetch(`/ran-api/api/sites/${encodeURIComponent(siteId)}/load`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ demandMbps: Number(demandMbps) }),
+  });
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(`RAN site load HTTP ${response.status}: ${body.slice(0, 400)}`);
+  }
+  let result;
+  try { result = JSON.parse(body); } catch {
+    throw new Error(`RAN site load returned invalid JSON: ${body.slice(0, 300)}`);
+  }
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    throw new Error('RAN site load returned an unexpected response shape.');
+  }
+  return result;
 }
 
 const localName = (iri = '') => String(iri).split(/[/#:]/).filter(Boolean).pop() || String(iri);
@@ -45,7 +90,8 @@ SELECT ?s ?p ?o WHERE {
     ?s ?p ?o .
     FILTER(!STRSTARTS(STR(?s), "${OBS_PREFIX}"))
   }
-}`;
+} ORDER BY ?s ?p ?o
+ LIMIT ${RAN_GRAPH_LIMITS.RDF_TRIPLES}`;
 
 // Starting point tab: the RAN classes configured in GraphDB Visual Graph.
 const startingPointQuery = (graphIri) => `${PREFIX}
@@ -56,7 +102,9 @@ SELECT DISTINCT ?node ?type ?label ?comment WHERE {
     OPTIONAL { ?node rdfs:label ?label }
     OPTIONAL { ?node rdfs:comment ?comment }
   }
-} ORDER BY ?type ?label ?node`;
+} 
+ORDER BY ?type ?label ?node
+LIMIT ${RAN_GRAPH_LIMITS.STARTING_NODES}`;
 
 // Graph expansion tab: same four relationship predicates and both directions as supplied.
 const graphExpansionQuery = (graphIri) => `${PREFIX}
@@ -80,7 +128,9 @@ SELECT DISTINCT ?from ?predicate ?to WHERE {
       BIND(?node AS ?to)
     }
   }
-}`;
+}
+ORDER BY ?from ?predicate ?to
+LIMIT ${RAN_GRAPH_LIMITS.RELATIONSHIPS}`;
 
 // Node basics tab: retains the provided type filter, label/comment and rank.
 const nodeBasicsQuery = (graphIri) => `${PREFIX}
@@ -109,7 +159,8 @@ SELECT ?node ?p ?value WHERE {
     FILTER(?type IN (${typeValues}))
     FILTER(!STRSTARTS(STR(?node), "${OBS_PREFIX}"))
   }
-} ORDER BY ?node ?p`;
+} ORDER BY ?node ?p
+ LIMIT ${RAN_GRAPH_LIMITS.NODE_PROPERTIES}`;
 
 export const RAN_VISUAL_CONFIG_QUERIES = (state = 'current') => {
   const graph = state === 'target' ? TARGET_GRAPH : CURRENT_GRAPH;
@@ -136,7 +187,8 @@ SELECT ?e ?m ?v ?t WHERE {
     }
     ?o a ran:Observation ; ran:observes ?e ; ran:metric ?m ; ran:observedAt ?t ; ran:value ?v .
   }
-}`;
+} ORDER BY ?e ?m
+ LIMIT ${RAN_GRAPH_LIMITS.TELEMETRY_ROWS}`;
 
 export async function loadRANTelemetry({ graphIri = CURRENT_GRAPH, maxAgeMinutes = 30 } = {}) {
   const [headRows, metrics] = await Promise.all([
@@ -201,7 +253,8 @@ SELECT DISTINCT ?cell ?label ?comment WHERE {
     OPTIONAL { ?cell rdfs:label ?label }
     OPTIONAL { ?cell rdfs:comment ?comment }
   }
-} ORDER BY ?label ?cell`;
+} ORDER BY ?label ?cell
+ LIMIT ${RAN_GRAPH_LIMITS.CELLS}`;
 
 export async function loadRANTopology(state = 'current') {
   const graphIri = state === 'target' ? TARGET_GRAPH : CURRENT_GRAPH;
@@ -352,3 +405,99 @@ SELECT ?element ?metric ?current ?target (?target - ?current AS ?change) WHERE {
   { id: 'Q4.2', stage: 'Stage 4 — Current vs Target', title: 'Target node metadata', query: nodeBasicsQuery(TARGET_GRAPH) },
   { id: 'Q4.3', stage: 'Stage 4 — Current vs Target', title: 'Target KPI properties', query: nodeExtraQuery(TARGET_GRAPH) },
 ];
+
+// Site-level traffic-ingestion view. All measurements are read from the RAN
+// Current named graph; missing ontology fields remain null instead of being fabricated.
+export async function loadRANSiteIngestion() {
+const graphRows = await runRANSparql(`${PREFIX}
+    SELECT ?s ?p ?o WHERE {
+      GRAPH <${CURRENT_GRAPH}> {
+        ?s ?p ?o .
+        FILTER(!STRSTARTS(STR(?s), "${OBS_PREFIX}"))
+      }
+    }`);
+const telemetry = await loadRANTelemetry({ graphIri: CURRENT_GRAPH });
+const props = new Map();
+const types = new Map();
+const put = (id, predicate, value) => {
+if (!props.has(id)) props.set(id, {});
+const key = localName(predicate).toLowerCase();
+const current = props.get(id)[key];
+if (key === 'type' || key === 'label' || current == null) props.get(id)[key] = value;
+};
+graphRows.forEach((r) => {
+const id = r.s.value;
+const pred = r.p.value;
+const value = r.o.value;
+put(id, pred, value);
+if (pred.endsWith('#type') || pred.endsWith('/type')) {
+const type = localName(value);
+if (!types.has(id)) types.set(id, new Set());
+types.get(id).add(type);
+}
+});
+const idsOf = (type) => [...types.entries()].filter(([, set]) => set.has(type)).map(([id]) => id);
+const sites = idsOf('Site').map((id) => ({ id, label: props.get(id)?.label || localName(id) }));
+const dus = idsOf('O_DU').map((id) => ({ id, p: props.get(id) || {} }));
+const cus = idsOf('OCU').map((id) => ({ id, p: props.get(id) || {} }));
+const metricValues = new Map();
+telemetry.latest.forEach((r) => {
+const id = r.entity.startsWith(RAN_NS) ? r.entity : `${RAN_NS}${r.entity}`;
+if (!metricValues.has(id)) metricValues.set(id, {});
+metricValues.get(id)[String(r.metric).toLowerCase()] = Number(r.value);
+});
+const read = (id, names) => {
+const p = props.get(id) || {};
+const m = metricValues.get(id) || {};
+for (const name of names) {
+const key = name.toLowerCase();
+if (m[key] != null && Number.isFinite(m[key])) return m[key];
+if (p[key] != null && Number.isFinite(Number(p[key]))) return Number(p[key]);
+}
+return null;
+};
+const relation = (id, names) => {
+const p = props.get(id) || {};
+for (const name of names) if (p[name.toLowerCase()]) return p[name.toLowerCase()];
+return null;
+};
+const siteFor = (id) => {
+const direct = relation(id, ['locatedAt', 'site']);
+if (direct && sites.some((x) => x.id === direct)) return direct;
+const host = relation(id, ['hostedOn', 'host']);
+return host ? relation(host, ['locatedAt', 'site']) : null;
+};
+const clusters = [];
+sites.forEach((site) => {
+const siteDus = dus.filter((du) => siteFor(du.id) === site.id);
+const siteCus = cus.filter((cu) => siteFor(cu.id) === site.id || siteDus.some((du) => relation(du.id, ['connectsToCUCP', 'cu', 'servedBy']) === cu.id));
+siteCus.forEach((cu) => {
+const linked = siteDus.filter((du) => relation(du.id, ['connectsToCUCP', 'cu', 'servedBy']) === cu.id);
+const members = linked.length ? linked : (siteCus.length === 1 ? siteDus : []);
+const duCpuValues = members.map((du) => read(du.id, ['cpu_percent', 'cpuPercent', 'cpu'])).filter((v) => v != null);
+const duPrbValues = members.map((du) => read(du.id, ['prb_dl_percent', 'dlPrbPercent', 'prbDl', 'dlPrb'])).filter((v) => v != null);
+const cpus = members.map((du) => read(du.id, ['allocated_cores', 'allocatedCores', 'coresUsed'])).filter((v) => v != null);
+const total = read(cu.id, ['total_cores', 'totalCores', 'serverCores']);
+const used = read(cu.id, ['cores_used', 'coresUsed', 'allocated_cores', 'allocatedCores']);
+const maxCpu = duCpuValues.length ? Math.max(...duCpuValues) : null;
+const cuCpu = read(cu.id, ['cpu_percent', 'cpuPercent', 'cpu']);
+const threshold = read(cu.id, ['cpu_threshold_percent', 'cpuThresholdPercent', 'overloadThresholdPercent']);
+const limit = threshold ?? 85;
+const status = maxCpu == null && cuCpu == null ? 'NO DATA' : Math.max(maxCpu ?? 0, cuCpu ?? 0) >= limit ? 'OVERLOAD' : 'NORMAL';
+clusters.push({ id: cu.id, site: site.id, label: props.get(cu.id)?.label || localName(cu.id), duCount: members.length, host: members.map((du) => localName(relation(du.id, ['hostedOn', 'host']) || '')).filter(Boolean).join(', ') || null, duCpu: duCpuValues.length ? Math.max(...duCpuValues) : null, duPrb: duPrbValues.length ? duPrbValues.reduce((a, b) => a + b, 0) / duPrbValues.length : null, cuCpu, coresUsed: used ?? (cpus.length ? cpus.reduce((a, b) => a + b, 0) : null), totalCores: total, status });
+});
+});
+const thresholdValues = [...props.values()].map((p) => p.cputhresholdpercent ?? p.overloadthresholdpercent).filter((v) => v != null && Number.isFinite(Number(v)));
+const threshold = thresholdValues.length ? Number(thresholdValues[0]) : 85;
+const siteSummaries = sites.map((site) => {
+const members = dus.filter((du) => siteFor(du.id) === site.id);
+const userCounts = members.map((du) => read(du.id, ['active_users', 'activeUsers', 'users'])).filter((v) => v != null);
+const throughput = members.map((du) => read(du.id, ['throughput_mbps', 'throughputMbps', 'dlThroughputMbps'])).filter((v) => v != null);
+const capacities = members.map((du) => read(du.id, ['dl_capacity_mbps', 'dlCapacityMbps', 'duDlCapacityMbps', 'throughputCapacityMbps'])).filter((v) => v != null);
+const cpu = members.map((du) => read(du.id, ['cpu_percent', 'cpuPercent', 'cpu'])).filter((v) => v != null);
+const users = userCounts.reduce((a, b) => a + b, 0);
+const totalThroughput = throughput.reduce((a, b) => a + b, 0);
+return { ...site, users: userCounts.length ? users : null, perUeMbps: users > 0 && throughput.length ? totalThroughput / users : null, dlCapacityMbps: capacities.length ? capacities.reduce((a, b) => a + b, 0) : null, peakCpu: cpu.length ? Math.max(...cpu) : null };
+});
+return { sites: siteSummaries, clusters, readings: telemetry.latest.length, head: telemetry.head, threshold };
+}
